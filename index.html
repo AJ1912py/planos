@@ -1,0 +1,224 @@
+<!DOCTYPE html>
+<html lang="es"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<link rel="manifest" href="manifest.webmanifest"><meta name="theme-color" content="#243238">
+<link rel="icon" href="icon-192.png"><title>Planos</title>
+<style>
+:root{--bg:#f4f5f3;--ink:#1d2428;--line:#c9cfcc;--ac:#0b6e66;--bar:#243238}
+*{box-sizing:border-box}html,body{height:100%;margin:0;overscroll-behavior:none;font:15px system-ui,sans-serif;color:var(--ink);background:var(--bg)}
+body{display:flex;flex-direction:column}
+#bar{display:flex;flex-wrap:wrap;gap:6px;padding:6px;background:var(--bar);align-items:center}
+#bar i{width:1px;height:30px;background:#52636a;margin:0 4px}
+button{min-height:46px;padding:0 14px;border:1px solid var(--line);border-radius:8px;background:#fff;font:inherit;color:var(--ink)}
+#bar button{background:#34454c;color:#fff;border-color:#4b5f67}
+button.on{background:var(--ac)!important;color:#fff!important;border-color:var(--ac)!important}
+main{flex:1;min-height:0;display:flex}
+#c{flex:1;min-width:0;height:100%;touch-action:none;background:#fff;display:block}
+#pn{width:250px;overflow:auto;padding:10px;border-left:1px solid var(--line);background:var(--bg)}
+#pn h3{margin:4px 0 8px;font-size:16px}#pn p{color:#586268;font-size:13px;margin:6px 0}
+#pn label{display:block;margin:8px 0;font-size:13px}
+#pn input,#pn select{width:100%;min-height:42px;font:inherit;padding:0 8px;border:1px solid var(--line);border-radius:6px;margin-top:3px;background:#fff}
+#pn button{width:100%;margin:4px 0}
+.g3{display:grid;grid-template-columns:repeat(3,1fr);gap:4px;width:150px;margin:6px 0}.g3 button{min-height:44px;padding:0;margin:0;width:auto}
+#st{padding:4px 10px;font-size:12px;background:#e4e8e5;color:#46535a;min-height:24px}
+#ts{position:fixed;left:50%;bottom:44px;transform:translateX(-50%);background:#243238;color:#fff;padding:8px 14px;border-radius:8px;opacity:0;transition:opacity .2s;pointer-events:none}
+</style></head><body>
+<div id="bar">
+<button data-tool="sel">Seleccionar</button><button data-tool="wall">Muro</button><button data-tool="room">Habitación</button><button data-tool="op">Abertura</button><i></i>
+<button data-tg="snap">Pegado</button><button data-tg="giro">Giro</button><button data-tg="ortho">Ortogonal</button><button data-tg="finger">Dedo dibuja</button><i></i>
+<button data-a="undo">↶ Deshacer</button><button data-a="redo">↷ Rehacer</button><button data-a="fit">Ajustar vista</button><button data-a="save">Respaldo</button><button data-a="new">Nuevo</button>
+</div>
+<main><canvas id="c"></canvas><aside id="pn"></aside></main><div id="st"></div><div id="ts"></div>
+<script>
+'use strict';
+const $=s=>document.querySelector(s),C=$('#c'),X=C.getContext('2d'),PN=$('#pn');
+// Capa de guardado separada (luego se cambia por almacenamiento nativo/nube)
+const Store={load(){try{return JSON.parse(localStorage.getItem('plano1'))}catch(e){return null}},
+ save(d){try{localStorage.setItem('plano1',JSON.stringify(d))}catch(e){toast('No se pudo guardar')}}};
+const blank=()=>({walls:[],ops:[],rooms:[],types:{},seq:1,wt:150,cfg:{}});
+let P=Store.load()||blank();
+let S={tool:'sel',snap:1,giro:1,ortho:1,finger:0,sel:null,anc:0,rw:4000,rh:3000,ok:'P',oty:1,hv:null,drag:null,pend:null};
+Object.assign(S,P.cfg||{});
+let V={s:.1,x:80,y:80},U=[],R=[],cur=JSON.stringify(P),fr=0;
+const TY={P:['1 hoja','2 hojas','Corrediza'],V:['1 hoja','2 hojas','Corrediza','Paño fijo']};
+const DEF={P:{w:900,h:2100,sl:0},V:{w:1200,h:1100,sl:900}};
+const nid=()=>P.seq++,W=i=>P.walls.find(w=>w.id==i),clamp=(v,a,b)=>Math.max(a,Math.min(b,v)),gr=v=>Math.round(v/50)*50;
+const fm=v=>(v/1000).toFixed(2).replace('.',','),pm=s=>{const n=parseFloat(String(s).replace(',','.'));return isNaN(n)?null:Math.round(n*1000)};
+const sx=p=>[p[0]*V.s+V.x,p[1]*V.s+V.y],wx=(x,y)=>[(x-V.x)/V.s,(y-V.y)/V.s];
+function toast(t){const e=$('#ts');e.textContent=t;e.style.opacity=1;clearTimeout(e.t);e.t=setTimeout(()=>e.style.opacity=0,1800)}
+function commit(){const s=JSON.stringify(P);if(s==cur)return;U.push(cur);if(U.length>150)U.shift();R.length=0;cur=s;Store.save(P)}
+function undo(){if(!U.length)return;R.push(cur);cur=U.pop();P=JSON.parse(cur);S.sel=null;S.drag=null;S.pend=null;Store.save(P);panel()}
+function redo(){if(!R.length)return;U.push(cur);cur=R.pop();P=JSON.parse(cur);S.sel=null;Store.save(P);panel()}
+// ---- Geometría de muros (mm enteros, eje + espesor)
+function wg(w){const dx=w.b[0]-w.a[0],dy=w.b[1]-w.a[1],L=Math.hypot(dx,dy)||1;return{dx:dx/L,dy:dy/L,nx:-dy/L,ny:dx/L,L}}
+function quad(w){const g=wg(w),h=w.t/2,A=[w.a[0]-g.dx*h,w.a[1]-g.dy*h],B=[w.b[0]+g.dx*h,w.b[1]+g.dy*h];
+ return[[A[0]+g.nx*h,A[1]+g.ny*h],[B[0]+g.nx*h,B[1]+g.ny*h],[B[0]-g.nx*h,B[1]-g.ny*h],[A[0]-g.nx*h,A[1]-g.ny*h]]}
+function loc(w,p){const g=wg(w),x=p[0]-w.a[0],y=p[1]-w.a[1];return[x*g.dx+y*g.dy,x*g.nx+y*g.ny,g]}
+// ---- Pegado inteligente: esquinas > caras/ejes > cuadrícula
+function snap(p){
+ if(!S.snap)return{p:p.map(Math.round),k:0};
+ const r=18/V.s;let b=null,bd=r;
+ for(const w of P.walls)for(const q of quad(w).concat([w.a,w.b])){const d=Math.hypot(q[0]-p[0],q[1]-p[1]);if(d<bd){bd=d;b=q.map(Math.round)}}
+ if(b)return{p:b,k:1};
+ bd=r;
+ for(const w of P.walls){const[u,,g]=loc(w,p),h=w.t/2,uu=clamp(u,-h,g.L+h);
+  for(const o of[-h,0,h]){const q=[w.a[0]+g.dx*uu+g.nx*o,w.a[1]+g.dy*uu+g.ny*o],d=Math.hypot(q[0]-p[0],q[1]-p[1]);
+   if(d<bd){bd=d;b=q.map(Math.round);if(Math.abs(g.dy)<1e-6)b[0]=gr(p[0]);else if(Math.abs(g.dx)<1e-6)b[1]=gr(p[1])}}}
+ if(b)return{p:b,k:2};
+ return{p:[gr(p[0]),gr(p[1])],k:3}}
+// ---- Ortogonal / Giro para el muro en dibujo
+function endPoint(a,p){const s=snap(p);let q=s.p;
+ if(s.k!=1){let dx=q[0]-a[0],dy=q[1]-a[1];
+  if(S.ortho){if(Math.abs(dx)>=Math.abs(dy))dy=0;else dx=0}
+  else if(S.giro){const L=Math.hypot(dx,dy),an=Math.round(Math.atan2(dy,dx)/(Math.PI/4))*Math.PI/4;dx=L*Math.cos(an);dy=L*Math.sin(an)}
+  const L=Math.hypot(dx,dy);if(L&&S.snap&&(S.ortho||S.giro)){const k=Math.round(L/50)*50/L;dx*=k;dy*=k}
+  q=[Math.round(a[0]+dx),Math.round(a[1]+dy)]}
+ return q}
+// ---- Habitaciones: muros compartidos (solo se crean los tramos que faltan)
+function addRef(a,b,t){
+ const hz=a[1]==b[1],c=hz?a[1]:a[0],i=hz?0:1;let segs=[[Math.min(a[i],b[i]),Math.max(a[i],b[i])]];
+ for(const w of P.walls){if(!(hz?w.a[1]==w.b[1]:w.a[0]==w.b[0])||Math.abs((hz?w.a[1]:w.a[0])-c)>2)continue;
+  const ws=Math.min(w.a[i],w.b[i])-w.t/2,we=Math.max(w.a[i],w.b[i])+w.t/2;
+  segs=segs.flatMap(([x,y])=>{if(we<=x||ws>=y)return[[x,y]];const r=[];if(ws>x)r.push([x,ws]);if(we<y)r.push([we,y]);return r})}
+ for(const[s,e]of segs)if(e-s>=20)P.walls.push({id:nid(),a:hz?[s,c]:[c,s],b:hz?[e,c]:[c,e],t})}
+function addRoom(r){const t=P.wt,h=Math.round(t/2),x0=r.x,y0=r.y,x1=r.x+r.w,y1=r.y+r.h;
+ for(const[a,b]of[[[x0-h,y0-h],[x1+h,y0-h]],[[x1+h,y0-h],[x1+h,y1+h]],[[x0-h,y1+h],[x1+h,y1+h]],[[x0-h,y0-h],[x0-h,y1+h]]])addRef(a,b,t);
+ P.rooms.push({id:nid(),x:x0,y:y0,w:r.w,h:r.h,n:'Ambiente '+(P.rooms.length+1)})}
+function rectDrag(a,b){const f=(p,q,k)=>k==1?[p-Math.abs(q-p),2*Math.abs(q-p)]:[Math.min(p,q),Math.abs(q-p)];
+ const[x,w]=f(a[0],b[0],S.anc%3),[y,h]=f(a[1],b[1],S.anc/3|0);return{x:Math.round(x),y:Math.round(y),w:Math.round(w),h:Math.round(h)}}
+function rectTyped(a){const f=(p,l,k)=>Math.round(k==0?p:k==2?p-l:p-l/2);return{x:f(a[0],S.rw,S.anc%3),y:f(a[1],S.rh,S.anc/3|0),w:S.rw,h:S.rh}}
+function okPend(){if(!S.pend)return;addRoom(rectTyped(S.pend.a));S.pend=null;commit();panel()}
+// ---- Aberturas: catálogo automático (menor número libre)
+function recode(){const key=o=>[o.k,o.ty,o.w,o.h,o.sl].join('|'),used=new Set(P.ops.map(key));
+ for(const k in P.types)if(!used.has(k))delete P.types[k];
+ for(const o of P.ops){const k=key(o);if(!P.types[k]){const n=new Set(Object.values(P.types).filter(c=>c[0]==o.k).map(c=>+c.slice(1)));let i=1;while(n.has(i))i++;P.types[k]=o.k+i}o.c=P.types[k]}}
+function near(p,tol=300){let b=null,bd=1e9;for(const w of P.walls){const[u,v,g]=loc(w,p);if(u<0||u>g.L||Math.abs(v)>w.t/2+tol)continue;if(Math.abs(v)<bd){bd=Math.abs(v);b={w,u,v}}}return b}
+function fixPos(o){const w=W(o.wid),L=wg(w).L;o.pos=o.w>=L?Math.round(L/2):clamp(o.pos,o.w/2,L-o.w/2)}
+function hit(p){const tol=14/V.s;
+ for(const o of[...P.ops].reverse()){const w=W(o.wid),[u,v]=loc(w,p);if(Math.abs(u-o.pos)<=o.w/2+tol&&Math.abs(v)<=w.t/2+tol)return{t:'o',o}}
+ for(const w of P.walls){const[u,v,g]=loc(w,p);if(u>=-w.t/2-tol&&u<=g.L+w.t/2+tol&&Math.abs(v)<=w.t/2+tol)return{t:'w',w}}
+ for(const r of P.rooms)if(p[0]>=r.x&&p[0]<=r.x+r.w&&p[1]>=r.y&&p[1]<=r.y+r.h)return{t:'r',r};return null}
+function del(){const s=S.sel;if(!s)return;
+ if(s.t=='w'){P.ops=P.ops.filter(o=>o.wid!=s.w.id);P.walls=P.walls.filter(w=>w!=s.w)}
+ else if(s.t=='o')P.ops=P.ops.filter(o=>o!=s.o);else P.rooms=P.rooms.filter(r=>r!=s.r); // al borrar un ambiente los muros se conservan
+ S.sel=null;recode();commit();panel()}
+// ---- Herramientas
+function down(p){const t=S.tool;
+ if(t=='sel'){S.sel=hit(p);if(S.sel&&S.sel.t=='o')S.drag={k:'od',o:S.sel.o};panel()}
+ else if(t=='wall'){const a=snap(p).p;S.drag={k:'w',a,b:a}}
+ else if(t=='room'){const a=snap(p).p;S.pend=null;S.drag={k:'r',a,b:a};panel()}
+ else if(t=='op'){const n=near(p);if(!n)return toast('Toca sobre un muro');
+  const o={id:nid(),wid:n.w.id,pos:Math.round(n.u/10)*10,k:S.ok,ty:S.oty,...DEF[S.ok],sd:n.v>=0?1:-1,hg:1};
+  P.ops.push(o);fixPos(o);recode();S.sel={t:'o',o};S.drag={k:'od',o,nuevo:1};panel()}}
+function move(p){const d=S.drag;if(!d)return;
+ if(d.k=='w')d.b=endPoint(d.a,p);else if(d.k=='r')d.b=snap(p).p;
+ else if(d.k=='od'){const w=W(d.o.wid),[u]=loc(w,p);d.o.pos=Math.round(u/10)*10;fixPos(d.o)}}
+function up(cancel){const d=S.drag;S.drag=null;if(!d)return;
+ if(cancel){if(d.nuevo){P.ops.pop();S.sel=null;recode()}return}
+ if(d.k=='w'){if(Math.hypot(d.b[0]-d.a[0],d.b[1]-d.a[1])>=100){P.walls.push({id:nid(),a:d.a,b:d.b,t:P.wt});commit()}}
+ else if(d.k=='r'){if(Math.abs(d.b[0]-d.a[0])<150&&Math.abs(d.b[1]-d.a[1])<150)S.pend={a:d.a};else{addRoom(rectDrag(d.a,d.b));commit()}}
+ else commit();
+ panel()}
+// ---- Entrada: lápiz/mouse dibuja, dedo mueve y hace zoom (2 dedos)
+const pt=new Map();let mode=0,pv=null,tap=null;
+const pinch=()=>{const t=[...pt.values()].filter(q=>q.t=='touch');return{d:Math.hypot(t[0].x-t[1].x,t[0].y-t[1].y)||1,cx:(t[0].x+t[1].x)/2,cy:(t[0].y+t[1].y)/2}};
+C.onpointerdown=e=>{
+ if(e.pointerType=='touch'&&[...pt.values()].some(q=>q.t=='pen'))return; // palma ignorada con lápiz apoyado
+ C.setPointerCapture(e.pointerId);pt.set(e.pointerId,{x:e.offsetX,y:e.offsetY,t:e.pointerType});
+ if([...pt.values()].filter(q=>q.t=='touch').length>=2){S.drag=null;mode='pinch';pv=pinch();return}
+ if(e.pointerType!='touch'||S.finger){mode='tool';down(wx(e.offsetX,e.offsetY))}else{mode='pan';tap={m:0}}
+ render()};
+C.onpointermove=e=>{const q=pt.get(e.pointerId),x=e.offsetX,y=e.offsetY;
+ if(q){const dx=x-q.x,dy=y-q.y;q.x=x;q.y=y;
+  if(mode=='pinch'){const n=pinch(),w0=wx(pv.cx,pv.cy);V.s=clamp(V.s*n.d/pv.d,.008,1);V.x=n.cx-w0[0]*V.s;V.y=n.cy-w0[1]*V.s;pv=n}
+  else if(mode=='pan'){V.x+=dx;V.y+=dy;tap.m+=Math.hypot(dx,dy)}
+  else if(mode=='tool')move(wx(x,y))}
+ S.hv=wx(x,y);render()};
+C.onpointerup=C.onpointercancel=e=>{const q=pt.get(e.pointerId);if(!q)return;pt.delete(e.pointerId);
+ if(mode=='tool')up(e.type=='pointercancel');
+ else if(mode=='pan'&&tap.m<8&&S.tool=='sel'){S.sel=hit(wx(e.offsetX,e.offsetY));panel()}
+ if(mode=='pinch'?[...pt.values()].filter(q=>q.t=='touch').length<2:1)mode=0;
+ render()};
+C.addEventListener('wheel',e=>{e.preventDefault();const w0=wx(e.offsetX,e.offsetY);V.s=clamp(V.s*(e.deltaY<0?1.15:1/1.15),.008,1);V.x=e.offsetX-w0[0]*V.s;V.y=e.offsetY-w0[1]*V.s;render()},{passive:false});
+addEventListener('keydown',e=>{if(e.target.tagName=='INPUT')return;if(e.key=='Enter')okPend();if(e.key=='Delete')del();if(e.ctrlKey&&e.key=='z')undo();if(e.ctrlKey&&e.key=='y')redo()});
+function fit(){const pts=P.walls.flatMap(quad).concat(P.rooms.flatMap(r=>[[r.x,r.y],[r.x+r.w,r.y+r.h]]));const w=C.clientWidth,h=C.clientHeight;
+ if(!pts.length){V={s:.1,x:80,y:80};return}
+ const x0=Math.min(...pts.map(p=>p[0])),x1=Math.max(...pts.map(p=>p[0])),y0=Math.min(...pts.map(p=>p[1])),y1=Math.max(...pts.map(p=>p[1]));
+ V.s=clamp(Math.min((w-80)/((x1-x0)||1),(h-80)/((y1-y0)||1)),.008,1);V.x=(w-(x1-x0)*V.s)/2-x0*V.s;V.y=(h-(y1-y0)*V.s)/2-y0*V.s}
+// ---- Dibujo
+function path(q){X.beginPath();q.forEach((p,i)=>{const s=sx(p);i?X.lineTo(s[0],s[1]):X.moveTo(s[0],s[1])});X.closePath()}
+function grid(w,h){const st=V.s>.08?100:V.s>.03?500:1000,a=wx(0,0),b=wx(w,h);X.lineWidth=1;
+ for(let x=Math.floor(a[0]/st)*st;x<=b[0];x+=st){X.strokeStyle=x%1000?'#eef0ee':'#d5dad7';const p=Math.round(x*V.s+V.x)+.5;X.beginPath();X.moveTo(p,0);X.lineTo(p,h);X.stroke()}
+ for(let y=Math.floor(a[1]/st)*st;y<=b[1];y+=st){X.strokeStyle=y%1000?'#eef0ee':'#d5dad7';const p=Math.round(y*V.s+V.y)+.5;X.beginPath();X.moveTo(0,p);X.lineTo(w,p);X.stroke()}}
+function drawOp(o,sel){const w=W(o.wid);if(!w)return;const g=wg(w),a=sx(w.a),h=w.t/2,x0=o.pos-o.w/2,x1=o.pos+o.w/2,s=o.sd,PI=Math.PI;
+ X.save();X.translate(a[0],a[1]);X.rotate(Math.atan2(g.dy,g.dx));X.scale(V.s,V.s);
+ X.fillStyle='#fff';X.fillRect(x0,-h-2,o.w,w.t+4);X.strokeStyle=sel?'#1d6fe0':'#1d2428';X.lineWidth=(sel?2.4:1.5)/V.s;X.beginPath();
+ const L=(a,b,c,d)=>{X.moveTo(a,b);X.lineTo(c,d)};L(x0,-h,x0,h);L(x1,-h,x1,h);
+ if(o.k=='P'){
+  if(o.ty==1){const l=o.hg>0,hx=l?x0:x1;L(hx,0,hx,s*o.w);X.moveTo(hx+(l?o.w:-o.w),0);X.arc(hx,0,o.w,l?0:PI,s*PI/2,l?s<0:s>0)}
+  else if(o.ty==2){const r=o.w/2;L(x0,0,x0,s*r);X.moveTo(x0+r,0);X.arc(x0,0,r,0,s*PI/2,s<0);L(x1,0,x1,s*r);X.moveTo(x1-r,0);X.arc(x1,0,r,PI,s*PI/2,s>0)}
+  else{L(x0,-h/3,x0+o.w*.55,-h/3);L(x1-o.w*.55,h/3,x1,h/3)}}
+ else if(o.ty==4)L(x0,0,x1,0);
+ else{L(x0,-h/3,x1,-h/3);L(x0,h/3,x1,h/3);if(o.ty==2)L(o.pos,-h/3,o.pos,h/3);if(o.ty==3)L(o.pos-o.w*.1,-h/3,o.pos-o.w*.1,h/3)}
+ X.stroke();X.restore();
+ const c=sx([w.a[0]+g.dx*o.pos-g.nx*s*(h+260),w.a[1]+g.dy*o.pos-g.ny*s*(h+260)]);
+ X.fillStyle=sel?'#1d6fe0':'#0b6e66';X.font='600 12px system-ui';X.textAlign='center';X.textBaseline='middle';X.fillText(o.c||'',c[0],c[1])}
+function lbl(t,p,c='#1d2428'){const s=sx(p);X.font='600 13px system-ui';X.textAlign='center';X.textBaseline='middle';const m=X.measureText(t).width+10;
+ X.fillStyle='rgba(255,255,255,.9)';X.fillRect(s[0]-m/2,s[1]-11,m,22);X.fillStyle=c;X.fillText(t,s[0],s[1])}
+function draw(){fr=0;const dpr=devicePixelRatio||1,w=C.clientWidth,h=C.clientHeight;
+ if(C.width!=Math.round(w*dpr)||C.height!=Math.round(h*dpr)){C.width=Math.round(w*dpr);C.height=Math.round(h*dpr)}
+ X.setTransform(dpr,0,0,dpr,0,0);X.clearRect(0,0,w,h);grid(w,h);
+ const sel=S.sel;
+ for(const r of P.rooms){const a=sx([r.x,r.y]);X.fillStyle='#e3e6e4';X.fillRect(a[0],a[1],r.w*V.s,r.h*V.s);
+  if(sel&&sel.r==r){X.strokeStyle='#1d6fe0';X.lineWidth=2.5;X.strokeRect(a[0],a[1],r.w*V.s,r.h*V.s)}
+  X.fillStyle='#46535a';X.font='600 13px system-ui';X.textAlign='center';X.textBaseline='middle';
+  X.fillText(r.n,a[0]+r.w*V.s/2,a[1]+r.h*V.s/2-8);X.font='13px system-ui';X.fillText((r.w*r.h/1e6).toFixed(2).replace('.',',')+' m²',a[0]+r.w*V.s/2,a[1]+r.h*V.s/2+9)}
+ X.lineJoin='miter';X.strokeStyle='#1d2428';X.lineWidth=3;for(const q of P.walls){path(quad(q));X.stroke()}
+ X.fillStyle='#7d868b';for(const q of P.walls){path(quad(q));X.fill()}
+ if(sel&&sel.w){path(quad(sel.w));X.strokeStyle='#1d6fe0';X.lineWidth=3;X.stroke()}
+ for(const o of P.ops)drawOp(o,sel&&sel.o==o);
+ const d=S.drag;
+ if(d&&d.k=='w'){const L=Math.hypot(d.b[0]-d.a[0],d.b[1]-d.a[1]);if(L>0){X.globalAlpha=.55;X.fillStyle='#0b6e66';path(quad({a:d.a,b:d.b,t:P.wt}));X.fill();X.globalAlpha=1;lbl(fm(L)+' m',[(d.a[0]+d.b[0])/2,(d.a[1]+d.b[1])/2-P.wt*2])}}
+ const rr=d&&d.k=='r'?rectDrag(d.a,d.b):S.pend?rectTyped(S.pend.a):null;
+ if(rr){const a=sx([rr.x,rr.y]);X.setLineDash([8,5]);X.strokeStyle='#0b6e66';X.lineWidth=2;X.strokeRect(a[0],a[1],rr.w*V.s,rr.h*V.s);X.setLineDash([]);
+  lbl(fm(rr.w)+' × '+fm(rr.h)+' m = '+(rr.w*rr.h/1e6).toFixed(2).replace('.',',')+' m²',[rr.x+rr.w/2,rr.y+rr.h/2],'#0b6e66')}
+ if(S.pend){const a=sx(S.pend.a);X.fillStyle='#d9480f';X.beginPath();X.arc(a[0],a[1],6,0,7);X.fill()}
+ if(S.hv&&(S.tool=='wall'||S.tool=='room')&&S.snap&&!S.pend){const q=snap(S.hv),a=sx(q.p);X.lineWidth=2;X.strokeStyle=['#999','#d9480f','#1d6fe0','#9aa3a8'][q.k];X.beginPath();X.arc(a[0],a[1],q.k==3?3:8,0,7);X.stroke()}
+ const h2=S.hv?`x ${fm(S.hv[0])}  y ${fm(S.hv[1])} m`:'';$('#st').textContent=h2+'   |   '+P.walls.length+' muros · '+P.ops.length+' aberturas · '+P.rooms.length+' ambientes   |   '+({sel:'Toca un elemento',wall:'Arrastra para trazar un muro',room:'Toca el punto de inserción; arrastra o escribe medidas',op:'Toca un muro; arrastra para deslizar'})[S.tool]}
+function render(){if(!fr)fr=requestAnimationFrame(draw)}
+// ---- Panel de propiedades
+function panel(){const f=(l,t,k,v,m=1,n=0)=>`<label>${l}<input data-t="${t}" data-k="${k}" ${m?'data-m=1':''} ${n?'data-n=1':''} value="${m?fm(v):v}" inputmode="${m?'decimal':'text'}"></label>`;
+ const sl=(l,t,k,opts,v)=>`<label>${l}<select data-t="${t}" data-k="${k}" data-n=1>${opts.map((x,i)=>`<option value="${x[0]}" ${x[0]==v?'selected':''}>${x[1]}</option>`).join('')}</select></label>`;
+ const kinds=[['P','Puerta'],['V','Ventana']],tys=k=>TY[k].map((x,i)=>[i+1,x]);let h='';const s=S.sel;
+ if(s&&s.t=='w')h=`<h3>Muro</h3><p>Largo (eje): ${fm(wg(s.w).L)} m</p>`+f('Espesor (m)','w','t',s.w.t)+`<button data-a="del">Borrar muro</button>`;
+ else if(s&&s.t=='o'){const o=s.o;h=`<h3>Abertura ${o.c||''}</h3>`+sl('Categoría','o','k',kinds,o.k)+sl('Tipología','o','ty',tys(o.k),o.ty)+f('Ancho (m)','o','w',o.w)+f('Alto (m)','o','h',o.h)+f('Antepecho (m)','o','sl',o.sl)+f('Posición en el muro (m)','o','pos',o.pos)+
+  (o.k=='P'?`<button data-a="flip">Cambiar lado de giro</button><button data-a="hinge">Cambiar bisagra</button>`:'')+`<button data-a="del">Borrar abertura</button>`}
+ else if(s&&s.t=='r'){const r=s.r;h=`<h3>Ambiente</h3>`+f('Nombre','r','n',r.n,0)+`<p>Interior ${fm(r.w)} × ${fm(r.h)} m<br>Área ${(r.w*r.h/1e6).toFixed(2).replace('.',',')} m²</p><button data-a="del">Borrar ambiente (los muros se conservan)</button>`}
+ else if(S.tool=='wall')h=`<h3>Muro</h3>`+f('Espesor nuevo (m)','P','wt',P.wt)+`<p>Arrastra con el lápiz. Ortogonal fuerza 90°, Giro ajusta a 45°, Pegado engancha a esquinas y caras.</p>`;
+ else if(S.tool=='room'){h=`<h3>Habitación</h3><p>1. Elige el punto de inserción</p><div class="g3">${[0,1,2,3,4,5,6,7,8].map(i=>`<button data-a="anc" data-i="${i}" class="${S.anc==i?'on':''}">${['↖','↑','↗','←','•','→','↙','↓','↘'][i]}</button>`).join('')}</div>`+
+  `<p>2. Toca el plano (se pega a lo existente) y arrastra, o escribe medidas interiores.</p>`+f('Ancho interior (m)','S','rw',S.rw)+f('Largo interior (m)','S','rh',S.rh)+(S.pend?`<button data-a="ok" class="on">Crear habitación</button>`:'')+f('Espesor de muros (m)','P','wt',P.wt)}
+ else if(S.tool=='op')h=`<h3>Abertura nueva</h3>`+sl('Categoría','S','ok',kinds,S.ok)+sl('Tipología','S','oty',tys(S.ok),S.oty)+`<p>Toca un muro. Arrastra para deslizarla. El código (P1, V1…) se asigna solo según medidas y tipología.</p>`;
+ else h=`<h3>Selección</h3><p>Toca un muro, abertura o ambiente. Las aberturas se pueden arrastrar a lo largo de su muro.</p>`;
+ PN.innerHTML=h;document.querySelectorAll('[data-tool]').forEach(b=>b.classList.toggle('on',b.dataset.tool==S.tool));document.querySelectorAll('[data-tg]').forEach(b=>b.classList.toggle('on',!!S[b.dataset.tg]));render()}
+PN.onchange=e=>{const el=e.target,t=el.dataset.t,k=el.dataset.k;if(!t)return;let v=el.value;
+ if(el.dataset.m){v=pm(v);if(v==null||v<=0&&k!='sl')return panel()}else if(el.dataset.n&&!isNaN(+v))v=+v;
+ const o=t=='S'?S:t=='P'?P:S.sel&&(S.sel.o||S.sel.w||S.sel.r);if(!o)return;
+ if(t=='o'&&k=='pos')o.pos=v;else o[k]=v;
+ if(t=='S'&&k=='ok')S.oty=1;
+ if(t=='o'){if(k=='k'){Object.assign(o,DEF[v],{ty:1})}fixPos(o);recode()}
+ if(t!='S')commit();panel()};
+PN.onclick=e=>{const b=e.target.closest('button');if(!b)return;const a=b.dataset.a;
+ if(a=='anc'){S.anc=+b.dataset.i}else if(a=='ok')return okPend();else if(a=='del')return del();
+ else if(a=='flip'){S.sel.o.sd*=-1;commit()}else if(a=='hinge'){S.sel.o.hg*=-1;commit()}panel()};
+$('#bar').onclick=e=>{const b=e.target.closest('button');if(!b)return;const d=b.dataset;
+ if(d.tool){S.tool=d.tool;S.pend=null;S.drag=null;if(d.tool!='sel')S.sel=null}
+ else if(d.tg){S[d.tg]^=1;P.cfg={snap:S.snap,giro:S.giro,ortho:S.ortho,finger:S.finger};Store.save(P)}
+ else if(d.a=='undo')undo();else if(d.a=='redo')redo();else if(d.a=='fit')fit();
+ else if(d.a=='save'){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([JSON.stringify(P)],{type:'application/json'}));a.download='plano-respaldo.json';a.click()}
+ else if(d.a=='new'&&confirm('¿Empezar un plano nuevo? Se borra el actual (haz antes un respaldo).')){P=blank();U=[];R=[];cur=JSON.stringify(P);S.sel=null;Store.save(P);fit()}
+ panel()};
+addEventListener('resize',render);
+if(navigator.storage&&navigator.storage.persist)navigator.storage.persist();
+if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
+recode();panel();fit();render();
+</script></body></html>
